@@ -1,0 +1,439 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Loader2, CheckCircle2, AlertCircle, Send, MapPin, User, FileSpreadsheet, PercentSquare, X } from 'lucide-react';
+
+const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRVbVU1Z-6eqGoTE_jrS9H8ZMozALOUTF_mOrFq10V3lkkIrE3WAdt5gWjDI7vJjCmOurY50rxTcnxw/pub?output=csv";
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyeZ_vdoj8PoTuqGiYvDWbRFFkKMYYLl1ymRdPHlgM4RHWXd9jRRrhSJaQUQon3dxYRFg/exec";
+
+// Simple CSV Parser to handle commas inside quotes
+const parseCSV = (str) => {
+  const arr = [];
+  let quote = false;
+  let row = 0, col = 0;
+  for (let c = 0; c < str.length; c++) {
+    let cc = str[c], nc = str[c + 1];
+    arr[row] = arr[row] || [];
+    arr[row][col] = arr[row][col] || '';
+    if (cc === '"' && quote && nc === '"') { arr[row][col] += cc; ++c; continue; }
+    if (cc === '"') { quote = !quote; continue; }
+    if (cc === ',' && !quote) { ++col; continue; }
+    if (cc === '\r' && nc === '\n' && !quote) { ++row; col = 0; ++c; continue; }
+    if (cc === '\n' && !quote) { ++row; col = 0; continue; }
+    if (cc === '\r' && !quote) { ++row; col = 0; continue; }
+    arr[row][col] += cc;
+  }
+  return arr;
+};
+
+const SearchableSelect = ({ options, value, onChange, placeholder, disabled = false }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const wrapperRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const filteredOptions = options.filter(opt => 
+    opt.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  return (
+    <div ref={wrapperRef} className="relative w-full">
+      <div 
+        className={`w-full p-3 bg-white border border-gray-300 rounded-lg shadow-sm flex items-center justify-between cursor-pointer transition-colors ${disabled ? 'opacity-50 bg-gray-100 cursor-not-allowed' : 'hover:border-blue-500'}`}
+        onClick={() => !disabled && setIsOpen(!isOpen)}
+      >
+        <span className={`truncate ${value ? "text-gray-900" : "text-gray-400"}`}>
+          {value || placeholder}
+        </span>
+        <svg className={`w-5 h-5 text-gray-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+      </div>
+
+      {isOpen && (
+        <div className="absolute z-20 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-hidden flex flex-col">
+          <div className="p-2 border-b border-gray-200 bg-gray-50">
+            <input
+              type="text"
+              className="w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+              placeholder="Search..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              autoFocus
+            />
+          </div>
+          <div className="overflow-y-auto custom-scrollbar">
+            {filteredOptions.length > 0 ? (
+              filteredOptions.map((opt, i) => (
+                <div
+                  key={i}
+                  className={`p-3 cursor-pointer text-sm hover:bg-blue-50 ${value === opt ? 'bg-blue-100 font-semibold text-blue-800' : 'text-gray-700'}`}
+                  onClick={() => {
+                    onChange(opt);
+                    setIsOpen(false);
+                    setSearchTerm('');
+                  }}
+                >
+                  {opt}
+                </div>
+              ))
+            ) : (
+              <div className="p-4 text-sm text-gray-500 text-center">No results found</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default function App() {
+  const [data, setData] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [fetchError, setFetchError] = useState('');
+  const [formError, setFormError] = useState('');
+
+  // Form State
+  const [fa, setFa] = useState('');
+  const [ls, setLs] = useState('');
+  const [ac, setAc] = useState('');
+  const [localBody, setLocalBody] = useState('');
+  const [booth, setBooth] = useState('');
+  
+  // Caste State
+  const [caste, setCaste] = useState({
+    nair: '', ezhava: '', scSt: '', muslim: '', christian: '', other: ''
+  });
+
+  const [submitStatus, setSubmitStatus] = useState('idle');
+
+  // Options State
+  const [faOptions, setFaOptions] = useState([]);
+  const [lsOptions, setLsOptions] = useState([]);
+  const [acOptions, setAcOptions] = useState([]);
+  const [localBodyOptions, setLocalBodyOptions] = useState([]);
+
+  useEffect(() => {
+    const fetchMasterData = async () => {
+      try {
+        const response = await fetch(CSV_URL);
+        const text = await response.text();
+        const parsed = parseCSV(text);
+        
+        if (parsed.length < 2) throw new Error("CSV is empty or invalid.");
+
+        const headers = parsed[0].map(h => h.replace(/^\uFEFF/, '').trim());
+        const getIdx = (keywords, fallback) => {
+          const idx = headers.findIndex(h => keywords.some(k => h.toLowerCase().includes(k)));
+          return idx >= 0 ? idx : fallback;
+        };
+
+        const idxFA = getIdx(['fa', 'name'], 0);
+        const idxLS = getIdx(['lok', 'parliament', 'pc'], 1);
+        const idxAC = getIdx(['assembly', 'ac'], 2);
+        const idxLB = getIdx(['local', 'body', 'panchayat', 'lb'], 3);
+
+        const mappedData = parsed.slice(1).map(row => ({
+          fa: row[idxFA]?.trim() || '',
+          ls: row[idxLS]?.trim() || '',
+          ac: row[idxAC]?.trim() || '',
+          lb: row[idxLB]?.trim() || ''
+        })).filter(row => row.fa);
+
+        setData(mappedData);
+        
+        const uniqueFAs = [...new Set(mappedData.map(row => row.fa).filter(Boolean))].sort();
+        setFaOptions(uniqueFAs);
+        setIsLoading(false);
+      } catch (err) {
+        console.error(err);
+        setFetchError('Failed to load master data. Please check connection.');
+        setIsLoading(false);
+      }
+    };
+    fetchMasterData();
+  }, []);
+
+  useEffect(() => {
+    if (!fa) { setLsOptions([]); setLs(''); setAcOptions([]); setAc(''); setLocalBodyOptions([]); setLocalBody(''); return; }
+    const filteredLs = [...new Set(data.filter(row => row.fa === fa).map(row => row.ls).filter(Boolean))].sort();
+    setLsOptions(filteredLs);
+    if (filteredLs.length === 1) setLs(filteredLs[0]); else { setLs(''); setAc(''); setLocalBody(''); }
+  }, [fa, data]);
+
+  useEffect(() => {
+    if (!ls) { setAcOptions([]); setAc(''); setLocalBodyOptions([]); setLocalBody(''); return; }
+    const filteredAc = [...new Set(data.filter(row => row.fa === fa && row.ls === ls).map(row => row.ac).filter(Boolean))].sort();
+    setAcOptions(filteredAc);
+    if (filteredAc.length === 1) setAc(filteredAc[0]); else { setAc(''); setLocalBody(''); }
+  }, [ls, fa, data]);
+
+  useEffect(() => {
+    if (!ac) { setLocalBodyOptions([]); setLocalBody(''); return; }
+    const filteredLb = [...new Set(data.filter(row => row.fa === fa && row.ls === ls && row.ac === ac).map(row => row.lb).filter(Boolean))].sort();
+    setLocalBodyOptions(filteredLb);
+    if (filteredLb.length === 1) setLocalBody(filteredLb[0]); else setLocalBody('');
+  }, [ac, ls, fa, data]);
+
+  const casteTotal = Object.values(caste).reduce((sum, val) => sum + (parseFloat(val) || 0), 0);
+  
+  const handleCasteChange = (field, value) => {
+    if (value === '' || (Number(value) >= 0 && Number(value) <= 100)) {
+      setCaste(prev => ({ ...prev, [field]: value }));
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setFormError(''); // clear any previous errors
+    
+    if (!fa || !ls || !ac || !localBody || !booth) {
+      setFormError("Please complete all location mapping fields before submitting.");
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    
+    if (Math.abs(casteTotal - 100) > 0.01) {
+      setFormError(`Total caste composition must be exactly 100%. Currently it is ${casteTotal.toFixed(2)}%.`);
+      return;
+    }
+
+    setSubmitStatus('submitting');
+
+    const payload = {
+      timestamp: new Date().toISOString(),
+      faName: fa,
+      lsConstituency: ls,
+      acConstituency: ac,
+      localBody: localBody,
+      boothNumber: booth,
+      casteComposition: caste
+    };
+
+    try {
+      await fetch(WEB_APP_URL, {
+        method: 'POST',
+        mode: 'no-cors', 
+        headers: { 
+          'Content-Type': 'text/plain', // Changed from application/json to text/plain to bypass browser blocking
+        },
+        body: JSON.stringify(payload)
+      });
+      setSubmitStatus('success');
+    } catch (err) {
+      console.error(err);
+      setFormError("Network error. Failed to save data. Please try again.");
+      setSubmitStatus('idle');
+    }
+  };
+
+  const resetForm = () => {
+    setFa(''); setLs(''); setAc(''); setLocalBody(''); setBooth('');
+    setCaste({ nair: '', ezhava: '', scSt: '', muslim: '', christian: '', other: '' });
+    setSubmitStatus('idle');
+    setFormError('');
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4">
+        <Loader2 className="w-10 h-10 text-blue-600 animate-spin mb-4" />
+        <h2 className="text-xl font-semibold text-gray-800">Syncing Master Data</h2>
+        <p className="text-gray-500 mt-2 text-sm text-center">Connecting to Google Sheets...</p>
+      </div>
+    );
+  }
+
+  if (submitStatus === 'success') {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-2xl shadow-lg border border-gray-200 max-w-md w-full text-center">
+          <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <CheckCircle2 className="w-8 h-8 text-green-600" />
+          </div>
+          <h2 className="text-2xl font-bold text-gray-800 mb-3">Data Saved!</h2>
+          <p className="text-gray-600 mb-8">Booth <span className="font-semibold text-gray-900">{booth}</span> mapping has been successfully recorded.</p>
+          <button 
+            onClick={resetForm}
+            className="w-full bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            Submit Another Booth
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 py-8 px-4 sm:px-6 lg:px-8 font-sans">
+      <div className="max-w-2xl mx-auto">
+        <div className="bg-white rounded-2xl shadow-md border border-gray-200 overflow-hidden">
+          
+          {/* Header */}
+          <div className="bg-blue-700 p-6 text-white">
+            <h1 className="text-2xl font-bold flex items-center gap-2">
+              <FileSpreadsheet className="w-6 h-6" />
+              Booth Survey
+            </h1>
+            <p className="text-blue-100 mt-2 opacity-90 text-sm">
+              Kerala State Data Collection • Real-time Sync
+            </p>
+          </div>
+
+          <form className="p-6 sm:p-8 space-y-8">
+            
+            {/* Top Error Message Box (Replaces alert) */}
+            {formError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center justify-between shadow-sm">
+                <div className="flex items-center gap-3">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                  <span className="text-sm font-medium">{formError}</span>
+                </div>
+                <button type="button" onClick={() => setFormError('')} className="text-red-500 hover:text-red-700">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            {/* Section 1: Location */}
+            <div className="space-y-6">
+              <div className="flex items-center gap-2 border-b border-gray-200 pb-2">
+                <MapPin className="w-5 h-5 text-blue-600" />
+                <h2 className="text-lg font-semibold text-gray-800">1. Assignment</h2>
+              </div>
+
+              <div className="space-y-5">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Field Associate</label>
+                  <SearchableSelect options={faOptions} value={fa} onChange={setFa} placeholder="Select your name..." />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Lok Sabha</label>
+                    {lsOptions.length === 1 ? (
+                      <div className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg text-gray-700 font-medium flex items-center gap-2 shadow-sm">
+                        <CheckCircle2 className="w-5 h-5 text-green-500"/> {ls}
+                      </div>
+                    ) : (
+                      <SearchableSelect options={lsOptions} value={ls} onChange={setLs} placeholder="Select Lok Sabha" disabled={!fa} />
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Assembly</label>
+                    {acOptions.length === 1 ? (
+                      <div className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg text-gray-700 font-medium flex items-center gap-2 shadow-sm">
+                        <CheckCircle2 className="w-5 h-5 text-green-500"/> {ac}
+                      </div>
+                    ) : (
+                      <SearchableSelect options={acOptions} value={ac} onChange={setAc} placeholder="Select Assembly" disabled={!ls} />
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Local Body</label>
+                    {localBodyOptions.length === 1 ? (
+                      <div className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg text-gray-700 font-medium flex items-center gap-2 shadow-sm">
+                        <CheckCircle2 className="w-5 h-5 text-green-500"/> {localBody}
+                      </div>
+                    ) : (
+                      <SearchableSelect options={localBodyOptions} value={localBody} onChange={setLocalBody} placeholder="Select Local Body" disabled={!ac} />
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Booth Number</label>
+                    <input
+                      type="number"
+                      required
+                      min="1"
+                      className="w-full p-3 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all shadow-sm"
+                      placeholder="e.g. 142"
+                      value={booth}
+                      onChange={(e) => setBooth(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 2: Demographics */}
+            <div className="space-y-6 pt-2">
+              <div className="flex items-center justify-between border-b border-gray-200 pb-2">
+                <div className="flex items-center gap-2">
+                  <User className="w-5 h-5 text-blue-600" />
+                  <h2 className="text-lg font-semibold text-gray-800">2. Demographics</h2>
+                </div>
+                <div className={`text-sm font-bold px-3 py-1.5 rounded-full flex items-center gap-2 ${Math.abs(casteTotal - 100) < 0.01 ? 'bg-green-100 text-green-700' : casteTotal > 100 ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}`}>
+                  Total: {casteTotal.toFixed(1)}%
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                {[
+                  { key: 'nair', label: 'Nair' },
+                  { key: 'ezhava', label: 'Ezhava' },
+                  { key: 'scSt', label: 'SC/ST' },
+                  { key: 'muslim', label: 'Muslim' },
+                  { key: 'christian', label: 'Christian' },
+                  { key: 'other', label: 'Other Hindus' },
+                ].map((item) => (
+                  <div key={item.key}>
+                    <label className="block text-sm font-medium text-gray-600 mb-1">{item.label}</label>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="100"
+                        className="w-full p-3 pr-8 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all shadow-sm"
+                        placeholder="0"
+                        value={caste[item.key]}
+                        onChange={(e) => handleCasteChange(item.key, e.target.value)}
+                      />
+                      <PercentSquare className="absolute right-3 top-3.5 w-4 h-4 text-gray-400" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Validation Warning */}
+              {Math.abs(casteTotal - 100) > 0.01 && casteTotal > 0 && (
+                <div className="bg-orange-50 border border-orange-200 text-orange-800 px-4 py-3 rounded-lg flex items-start gap-3 shadow-sm">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                  <p className="text-sm font-medium">
+                    Total must be exactly 100%. Currently off by {Math.abs(100 - casteTotal).toFixed(1)}%.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Submit Button */}
+            <div className="pt-4 border-t border-gray-200">
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={submitStatus === 'submitting' || Math.abs(casteTotal - 100) > 0.01}
+                className="w-full bg-blue-600 text-white font-bold py-4 px-6 rounded-xl shadow-md hover:bg-blue-700 transition-all flex justify-center items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {submitStatus === 'submitting' ? (
+                  <><Loader2 className="w-5 h-5 animate-spin" /> Saving Data...</>
+                ) : (
+                  <><Send className="w-5 h-5" /> Submit Survey Data</>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
